@@ -669,7 +669,7 @@ func GetPAC(address string, profile string) string {
 	for host := range DefaultProfile.DomainMap {
 		rule += fmt.Sprintf("\"%s\":1,\n", host)
 	}
-	Context := `var proxy = 'SOCKS %s';
+	Context := `var proxy = '%s';
 var rules = {
 %s}
 function FindProxyForURL(url, host) {
