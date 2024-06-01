@@ -35,6 +35,7 @@ var VirtualAddrPrefix byte = 255
 var DNSCache sync.Map
 var Nose []string = []string{"phantom.socks"}
 var NoseLock sync.Mutex
+var NSLookupLock sync.Mutex
 
 func TCPlookup(request []byte, address string, server *PhantomInterface) ([]byte, error) {
 	data := make([]byte, 1024)
@@ -1077,6 +1078,16 @@ func GetIP(name string, qtype uint16, hint uint32, u *url.URL, records *DNSRecor
 func NSLookup(name string, hint uint32, server string) (uint32, []net.IP) {
 	var address []net.IP
 	var records = LoadDNSCache(name)
+	var ReadCache = func() []net.IP {
+		if hint&HINT_IPV4 == hint&HINT_IPV6 {
+			address = append(GetIPCache(name, 1, records), GetIPCache(name, 28, records)...)
+		} else if hint&HINT_IPV4 != 0 {
+			address = GetIPCache(name, 1, records)
+		} else if hint&HINT_IPV6 != 0 {
+			address = GetIPCache(name, 28, records)
+		}
+		return address
+	}
 
 	if records == nil {
 		records = new(DNSRecords)
@@ -1099,15 +1110,19 @@ func NSLookup(name string, hint uint32, server string) (uint32, []net.IP) {
 		}
 	}
 
-	if hint&HINT_IPV4 == hint&HINT_IPV6 {
-		address = append(GetIPCache(name, 1, records), GetIPCache(name, 28, records)...)
-	} else if hint&HINT_IPV4 != 0 {
-		address = GetIPCache(name, 1, records)
-	} else if hint&HINT_IPV6 != 0 {
-		address = GetIPCache(name, 28, records)
-	}
+	address = ReadCache()
 
 	if address == nil {
+		defer logPrintln(5, "Unblock NSLookup:", name)
+		defer NSLookupLock.Unlock()
+		logPrintln(5, "Block NSLookup:", name)
+		NSLookupLock.Lock()
+
+		address = ReadCache() // reload after get ip
+		if len(address) > 0 {
+			return records.Index, address
+		}
+
 		u, err := url.Parse(server)
 		if err != nil {
 			logPrintln(1, err)
