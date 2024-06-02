@@ -27,6 +27,7 @@ type DNSRecords struct {
 	ALPN     uint32
 	IPv4Hint *RecordAddresses
 	IPv6Hint *RecordAddresses
+	Domains  []string
 	Ech      []byte
 }
 
@@ -990,12 +991,12 @@ func GetIPCache(name string, qtype uint16, records *DNSRecords) []net.IP {
 	switch qtype {
 	case 1:
 		if records.IPv4Hint != nil {
-			logPrintln(3, "Cached:", name, qtype, records.IPv4Hint.Addresses)
+			logPrintln(4, "Cached:", name, qtype, records.IPv4Hint.Addresses)
 			return records.IPv4Hint.Addresses
 		}
 	case 28:
 		if records.IPv6Hint != nil {
-			logPrintln(3, "Cached:", name, qtype, records.IPv6Hint.Addresses)
+			logPrintln(4, "Cached:", name, qtype, records.IPv6Hint.Addresses)
 			return records.IPv6Hint.Addresses
 		}
 	}
@@ -1078,16 +1079,6 @@ func GetIP(name string, qtype uint16, hint uint32, u *url.URL, records *DNSRecor
 func NSLookup(name string, hint uint32, server string) (uint32, []net.IP) {
 	var address []net.IP
 	var records = LoadDNSCache(name)
-	var ReadCache = func() []net.IP {
-		if hint&HINT_IPV4 == hint&HINT_IPV6 {
-			address = append(GetIPCache(name, 1, records), GetIPCache(name, 28, records)...)
-		} else if hint&HINT_IPV4 != 0 {
-			address = GetIPCache(name, 1, records)
-		} else if hint&HINT_IPV6 != 0 {
-			address = GetIPCache(name, 28, records)
-		}
-		return address
-	}
 
 	if records == nil {
 		records = new(DNSRecords)
@@ -1110,39 +1101,68 @@ func NSLookup(name string, hint uint32, server string) (uint32, []net.IP) {
 		}
 	}
 
-	address = ReadCache()
-
-	if address == nil {
-		defer logPrintln(5, "Unblock NSLookup:", name)
-		defer NSLookupLock.Unlock()
-		logPrintln(5, "Block NSLookup:", name)
-		NSLookupLock.Lock()
-
-		address = ReadCache() // reload after get ip
-		if len(address) > 0 {
-			return records.Index, address
+	if records.Domains != nil {
+		var wg sync.WaitGroup
+		var ResolveFakeCNAME = func(FakeCNAME string) {
+			defer wg.Done()
+			logPrintln(3, "FAKECNAME:", name, "->", FakeCNAME)
+			_, ips := NSLookup(FakeCNAME, hint, server)
+			if len(ips) == 0 {
+				logPrintln(1, errors.New("no such host: "+FakeCNAME))
+			}
+			address = append(address, ips...)
+		}
+		var domainNum = len(records.Domains)
+		wg.Add(domainNum)
+		for i := 0; i < domainNum; i++ {
+			go ResolveFakeCNAME(records.Domains[i])
+		}
+		wg.Wait()
+	} else {
+		var ReadCache = func() []net.IP {
+			if hint&HINT_IPV4 == hint&HINT_IPV6 {
+				address = append(GetIPCache(name, 1, records), GetIPCache(name, 28, records)...)
+			} else if hint&HINT_IPV4 != 0 {
+				address = GetIPCache(name, 1, records)
+			} else if hint&HINT_IPV6 != 0 {
+				address = GetIPCache(name, 28, records)
+			}
+			return address
 		}
 
-		u, err := url.Parse(server)
-		if err != nil {
-			logPrintln(1, err)
-			return 0, nil
-		}
+		address = ReadCache()
+		if address == nil {
+			defer logPrintln(5, "Unblock NSLookup:", name)
+			defer NSLookupLock.Unlock()
+			logPrintln(5, "Block NSLookup:", name)
+			NSLookupLock.Lock()
 
-		if records.Index == 0 && hint != 0 {
-			NoseLock.Lock()
-			records.Index = uint32(len(Nose))
-			records.ALPN = hint & HINT_DNS
-			Nose = append(Nose, name)
-			NoseLock.Unlock()
-		}
+			address = ReadCache() // reload after get ip
+			if len(address) > 0 {
+				return records.Index, address
+			}
 
-		if hint&HINT_IPV4 == hint&HINT_IPV6 {
-			address = append(GetIP(name, 1, hint, u, records), GetIP(name, 28, hint, u, records)...)
-		} else if hint&HINT_IPV4 != 0 {
-			address = GetIP(name, 1, hint, u, records)
-		} else if hint&HINT_IPV6 != 0 {
-			address = GetIP(name, 28, hint, u, records)
+			u, err := url.Parse(server)
+			if err != nil {
+				logPrintln(1, err)
+				return 0, nil
+			}
+
+			if records.Index == 0 && hint != 0 {
+				NoseLock.Lock()
+				records.Index = uint32(len(Nose))
+				records.ALPN = hint & HINT_DNS
+				Nose = append(Nose, name)
+				NoseLock.Unlock()
+			}
+
+			if hint&HINT_IPV4 == hint&HINT_IPV6 {
+				address = append(GetIP(name, 1, hint, u, records), GetIP(name, 28, hint, u, records)...)
+			} else if hint&HINT_IPV4 != 0 {
+				address = GetIP(name, 1, hint, u, records)
+			} else if hint&HINT_IPV6 != 0 {
+				address = GetIP(name, 28, hint, u, records)
+			}
 		}
 	}
 
