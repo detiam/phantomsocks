@@ -1119,7 +1119,7 @@ func NSLookup(name string, hint uint32, server string) (uint32, []net.IP) {
 		}
 		wg.Wait()
 	} else {
-		var ReadCache = func() []net.IP {
+		var ReadCache = func() {
 			if hint&HINT_IPV4 == hint&HINT_IPV6 {
 				address = append(GetIPCache(name, 1, records), GetIPCache(name, 28, records)...)
 			} else if hint&HINT_IPV4 != 0 {
@@ -1127,17 +1127,16 @@ func NSLookup(name string, hint uint32, server string) (uint32, []net.IP) {
 			} else if hint&HINT_IPV6 != 0 {
 				address = GetIPCache(name, 28, records)
 			}
-			return address
 		}
 
-		address = ReadCache()
+		ReadCache()
 		if address == nil {
 			defer logPrintln(5, "Unblock NSLookup:", name)
 			defer NSLookupLock.Unlock()
 			logPrintln(5, "Block NSLookup:", name)
 			NSLookupLock.Lock()
 
-			address = ReadCache() // reload after get ip
+			ReadCache() // reload after get ip
 			if len(address) > 0 {
 				return records.Index, address
 			}
