@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"fmt"
 	"io/ioutil"
 	"net"
 	"net/url"
@@ -65,15 +66,19 @@ func SetKeepAlive(conn net.Conn) error {
 }
 
 func InstallService() {
+	fmt.Println("Unsupported Platform.")
 }
 
 func RemoveService() {
+	fmt.Println("Unsupported Platform.")
 }
 
 func StartService() {
+	fmt.Println("Unsupported Platform.")
 }
 
 func StopService() {
+	fmt.Println("Unsupported Platform.")
 }
 
 func RunAsService(start func()) bool {
