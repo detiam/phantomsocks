@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 
 	ptcp "github.com/macronut/phantomsocks/phantomtcp"
 	proxy "github.com/macronut/phantomsocks/proxy"
@@ -23,6 +24,7 @@ var LogLevel int = 0
 var MaxProcs int = 1
 var PassiveMode bool = false
 var allowlist map[string]bool = nil
+var wg sync.WaitGroup
 
 func ListenAndServe(addr string, key string, serve func(net.Conn)) {
 	var l net.Listener = nil
@@ -47,6 +49,7 @@ func ListenAndServe(addr string, key string, serve func(net.Conn)) {
 		}
 	}
 
+	wg.Done()
 	if allowlist != nil {
 		for {
 			client, err := l.Accept()
@@ -124,6 +127,7 @@ func DNSServer(listenAddr string) error {
 	defer conn.Close()
 
 	fmt.Println("DNS:", listenAddr)
+	wg.Add(1)
 	go ListenAndServe(listenAddr, "", ptcp.DNSTCPServer)
 
 	data := make([]byte, 512)
@@ -217,17 +221,20 @@ func StartService() {
 			}(service.Address, strings.Split(service.PrivateKey, ","))
 		case "http":
 			fmt.Println("HTTP:", service.Address)
+			wg.Add(1)
 			go ListenAndServe(service.Address, service.PrivateKey, ptcp.HTTPProxy)
 			default_proxy = "HTTP " + service.Address
 		case "socks5":
 			fallthrough
 		case "socks":
 			fmt.Println("Socks:", service.Address)
+			wg.Add(1)
 			go ListenAndServe(service.Address, service.PrivateKey, ptcp.SocksProxy)
 			go ptcp.SocksUDPProxy(service.Address)
 			default_proxy = strings.ToUpper(service.Protocol) + " " + service.Address
 		case "redirect":
 			fmt.Println("Redirect:", service.Address)
+			wg.Add(1)
 			go ListenAndServe(service.Address, service.PrivateKey, ptcp.RedirectProxy)
 		case "tproxy":
 			fmt.Println("TProxy:", service.Address)
@@ -263,6 +270,7 @@ func StartService() {
 			}
 		case "reverse":
 			fmt.Println("Reverse:", service.Address)
+			wg.Add(1)
 			go ListenAndServe(service.Address, service.PrivateKey, ptcp.SNIProxy)
 			go ptcp.QUICProxy(service.Address)
 		}
@@ -283,6 +291,7 @@ func StartService() {
 
 	for _, Interfaces := range ServiceConfig.Interfaces {
 		if Interfaces.Hosts != nil {
+			wg.Wait()
 			err := ptcp.LoadHosts(Interfaces)
 			if err != nil {
 				if ptcp.LogLevel >= 0 {
