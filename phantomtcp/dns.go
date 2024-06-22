@@ -1034,7 +1034,7 @@ func GetIP(name string, qtype uint16, hint uint32, u *url.URL, records *DNSRecor
 		default:
 			NoseLock.Lock()
 			records.Index = uint32(len(Nose))
-			records.ALPN = hint
+			records.ALPN = hint & HINT_DNS
 			Nose = append(Nose, name)
 			NoseLock.Unlock()
 			return nil
