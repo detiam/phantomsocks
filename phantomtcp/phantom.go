@@ -682,48 +682,61 @@ func LoadHosts(filename string) error {
 			continue
 		}
 
-		k := strings.SplitN(string(line), "\t", 2)
-		if len(k) == 2 {
-			var records *DNSRecords
-
+		k := strings.Fields(string(line))
+		if len(k) != 2 {
+			logPrintln(1, "bad hosts line:", k, len(k))
+			continue
+		} else {
 			name := k[1]
-			_, ok := DNSCache.Load(name)
-			if ok {
+			records := LoadDNSCache(name)
+			if records != nil {
 				continue
-			}
-			offset := 0
-			for i := 0; i < SubdomainDepth; i++ {
-				off := strings.Index(name[offset:], ".")
-				if off == -1 {
-					break
+			} else {
+				records = new(DNSRecords)
+				StoreDNSCache(name, records)
+
+				offset := 0
+				for i := 0; i < SubdomainDepth; i++ {
+					off := strings.Index(name[offset:], ".")
+					if off == -1 {
+						break
+					}
+					offset += off
+					top := LoadDNSCache(name[offset:])
+					if top != nil {
+						*records = *top
+						break
+					}
+
+					offset++
 				}
-				offset += off
-				result, ok := DNSCache.Load(name[offset:])
-				if ok {
-					records = new(DNSRecords)
-					*records = *result.(*DNSRecords)
-					DNSCache.Store(name, records)
-					continue
-				}
-				offset++
 			}
 
 			server := DefaultProfile.GetInterface(name)
-			if ok && server.Hint != 0 {
+			if records.Index == 0 && server.Hint != 0 {
+				NoseLock.Lock()
 				records.Index = uint32(len(Nose))
 				records.ALPN = server.Hint & HINT_DNS
 				Nose = append(Nose, name)
+				NoseLock.Unlock()
 			}
+
 			ip := net.ParseIP(k[0])
 			if ip == nil {
-				fmt.Println(ip, "bad ip address")
+				logPrintln(1, "bad ip address:", ip)
 				continue
 			}
 			ip4 := ip.To4()
 			if ip4 != nil {
-				records.IPv4Hint = &RecordAddresses{0x7FFFFFFFFFFFFFFF, []net.IP{ip4}}
+				if records.IPv4Hint == nil {
+					records.IPv4Hint = new(RecordAddresses)
+				}
+				records.IPv4Hint.Addresses = append(records.IPv4Hint.Addresses, ip4)
 			} else {
-				records.IPv6Hint = &RecordAddresses{0x7FFFFFFFFFFFFFFF, []net.IP{ip}}
+				if records.IPv6Hint == nil {
+					records.IPv6Hint = new(RecordAddresses)
+				}
+				records.IPv6Hint.Addresses = append(records.IPv6Hint.Addresses, ip)
 			}
 		}
 	}
