@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,7 +44,8 @@ type InterfaceConfig struct {
 	Address    string `json:"address,omitempty"`
 	PrivateKey string `json:"privatekey,omitempty"`
 
-	Peers []Peer `json:"peers,omitempty"`
+	Hosts []string `json:"hosts,omitempty"`
+	Peers []Peer   `json:"peers,omitempty"`
 }
 
 type Peer struct {
@@ -660,14 +662,29 @@ func LoadProfile(filename string) error {
 	return nil
 }
 
-func LoadHosts(filename string) error {
-	hosts, err := os.Open(filename)
-	if err != nil {
-		return err
+func LoadHosts(Interfaces InterfaceConfig) error {
+	var br *bufio.Reader
+	var hosts = Interfaces.Hosts
+	_, err := os.Stat(hosts[0])
+	if len(hosts) == 1 && !os.IsNotExist(err) {
+		hostsFile, err := os.Open(hosts[0])
+		if err != nil {
+			return err
+		}
+		defer hostsFile.Close()
+		br = bufio.NewReader(hostsFile)
+	} else if os.IsNotExist(err) {
+		cmdstr := strings.Fields(strings.Join(hosts, " "))
+		cmd := exec.Command(cmdstr[0], cmdstr[1:]...)
+		output, err := cmd.Output()
+		if err != nil {
+			return err
+		}
+		br = bufio.NewReader(strings.NewReader(string(output)))
+	} else {
+		logPrintln(1, err)
+		return nil
 	}
-	defer hosts.Close()
-
-	br := bufio.NewReader(hosts)
 
 	for {
 		line, _, err := br.ReadLine()
@@ -712,11 +729,11 @@ func LoadHosts(filename string) error {
 				}
 			}
 
-			server := DefaultProfile.GetInterface(name)
-			if records.Index == 0 && server.Hint != 0 {
+			pface, ok := InterfaceMap[Interfaces.Name]
+			if ok && records.Index == 0 && pface.Hint != 0 {
 				NoseLock.Lock()
 				records.Index = uint32(len(Nose))
-				records.ALPN = server.Hint & HINT_DNS
+				records.ALPN = pface.Hint & HINT_DNS
 				Nose = append(Nose, name)
 				NoseLock.Unlock()
 			}
@@ -738,9 +755,11 @@ func LoadHosts(filename string) error {
 				}
 				records.IPv6Hint.Addresses = append(records.IPv6Hint.Addresses, ip)
 			}
+			logPrintln(4, "Stored:", k[1], k[0], pface)
 		}
 	}
 
+	logPrintln(0, "Hosts:", Interfaces.Name, hosts)
 	return nil
 }
 

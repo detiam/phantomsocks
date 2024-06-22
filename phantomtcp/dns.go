@@ -991,12 +991,12 @@ func GetIPCache(name string, qtype uint16, records *DNSRecords) []net.IP {
 	switch qtype {
 	case 1:
 		if records.IPv4Hint != nil {
-			logPrintln(4, "Cached:", name, qtype, records.IPv4Hint.Addresses)
+			logPrintln(3, "Cached:", name, qtype, records.IPv4Hint.Addresses)
 			return records.IPv4Hint.Addresses
 		}
 	case 28:
 		if records.IPv6Hint != nil {
-			logPrintln(4, "Cached:", name, qtype, records.IPv6Hint.Addresses)
+			logPrintln(3, "Cached:", name, qtype, records.IPv6Hint.Addresses)
 			return records.IPv6Hint.Addresses
 		}
 	}
