@@ -79,6 +79,14 @@ Usage of ./phantomsocks:
             "dns": "udp://8.8.8.8:53",
             "protocol": "socks4",
             "address": "127.0.0.1:1080"
+        },
+        {
+            "name": "hosts",
+            "dns": "udp://8.8.8.8:53",
+            "hosts": [
+                "env all_proxy=socks://127.0.0.1:1081",
+                "curl -sL https://github.com/StevenBlack/hosts/raw/master/hosts"
+            ]
         }
     ]
 }
