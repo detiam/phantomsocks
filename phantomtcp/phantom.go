@@ -705,13 +705,7 @@ func LoadHosts(Interfaces InterfaceConfig) error {
 			continue
 		} else {
 			name := k[1]
-			records := LoadDNSCache(name)
-			if records != nil {
-				continue
-			} else {
-				records = new(DNSRecords)
-				StoreDNSCache(name, records)
-
+			hasCached := func() bool {
 				offset := 0
 				for i := 0; i < SubdomainDepth; i++ {
 					off := strings.Index(name[offset:], ".")
@@ -721,14 +715,18 @@ func LoadHosts(Interfaces InterfaceConfig) error {
 					offset += off
 					top := LoadDNSCache(name[offset:])
 					if top != nil {
-						*records = *top
-						break
+						return true
 					}
 
 					offset++
 				}
+				return false
+			}
+			if hasCached() {
+				continue
 			}
 
+			records := new(DNSRecords)
 			pface, ok := InterfaceMap[Interfaces.Name]
 			if ok && records.Index == 0 && pface.Hint != 0 {
 				NoseLock.Lock()
@@ -755,6 +753,7 @@ func LoadHosts(Interfaces InterfaceConfig) error {
 				}
 				records.IPv6Hint.Addresses = append(records.IPv6Hint.Addresses, ip)
 			}
+			StoreDNSCache(name, records)
 			logPrintln(4, "Stored:", k[1], k[0], pface)
 		}
 	}
