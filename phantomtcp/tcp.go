@@ -297,22 +297,82 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 			}
 
 			var synpacket *ConnectionInfo
-			for i := 0; i < len(raddrs); i++ {
-				raddr := raddrs[i]
-				laddr, err := GetLocalAddr(device, raddr.IP.To4() == nil)
-				if err != nil {
-					return nil, nil, errors.New("invalid device")
-				}
-
-				conn, synpacket, err = DialConnInfo(laddr, raddr, pface, tfo_payload)
-				if err != nil {
-					if IsNormalError(err) {
-						continue
+			var preferaddrs, fallbackaddrs []*net.TCPAddr
+			for _, addr := range raddrs {
+				switch {
+				case hint&HINT_IPV4 == 0 && hint&HINT_IPV6 == 0: // prefer IPv4
+					if addr.IP.To4() != nil {
+						preferaddrs = append(preferaddrs, addr)
+					} else {
+						fallbackaddrs = append(fallbackaddrs, addr)
 					}
-					return nil, nil, err
+				case hint&HINT_IPV4 != 0 && hint&HINT_IPV6 != 0: // prefer IPv6
+					if addr.IP.To4() == nil {
+						preferaddrs = append(preferaddrs, addr)
+					} else {
+						fallbackaddrs = append(fallbackaddrs, addr)
+					}
+				default:
+					preferaddrs = append(preferaddrs, addr)
 				}
+			}
 
-				break
+			type DailResult struct {
+				conn      net.Conn
+				synpacket *ConnectionInfo
+				err       error
+			}
+
+			synpacket2chan := func(addrs []*net.TCPAddr, channel chan DailResult) {
+				if addrs == nil {
+					channel <- DailResult{err: errors.New("no addrs?")}
+					return
+				}
+				for _, addr := range addrs {
+					laddr, err := GetLocalAddr(device, addr.IP.To4() == nil)
+					if err != nil {
+						channel <- DailResult{err: errors.New("invalid device")}
+						return
+					}
+
+					conn, synpacket, err := DialConnInfo(laddr, addr, pface, tfo_payload)
+					if err != nil {
+						if IsNormalError(err) {
+							continue
+						}
+						channel <- DailResult{err: err}
+						return
+					}
+
+					channel <- DailResult{conn: conn, synpacket: synpacket, err: err}
+					return
+				}
+				channel <- DailResult{err: connect_err}
+			}
+
+			synpchan := make(chan DailResult, 2)
+			if len(preferaddrs) > 0 {
+				go synpacket2chan(preferaddrs, synpchan)
+			} else {
+				go synpacket2chan(fallbackaddrs, synpchan)
+			}
+			select {
+			case result := <-synpchan:
+				if result.err != nil {
+					return nil, nil, result.err
+				}
+				conn = result.conn
+				synpacket = result.synpacket
+			case <-time.After(300 * time.Millisecond):
+				if len(fallbackaddrs) > 0 && len(preferaddrs) > 0 {
+					go synpacket2chan(fallbackaddrs, synpchan)
+				}
+				result := <-synpchan
+				if result.err != nil {
+					return nil, nil, result.err
+				}
+				conn = result.conn
+				synpacket = result.synpacket
 			}
 
 			if synpacket == nil {
