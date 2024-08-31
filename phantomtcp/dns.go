@@ -1126,7 +1126,7 @@ func NSLookup(name string, hint uint32, server string) (uint32, []net.IP) {
 		wg.Wait()
 	} else {
 		var ReadCache = func() {
-			if hint&HINT_IPV4 == hint&HINT_IPV6 {
+			if hint&HINT_IPV4 == 0 && hint&HINT_IPV6 == 0 || hint&HINT_IPV4 != 0 && hint&HINT_IPV6 != 0 {
 				address = append(GetIPCache(name, 1, records), GetIPCache(name, 28, records)...)
 			} else if hint&HINT_IPV4 != 0 {
 				address = GetIPCache(name, 1, records)
@@ -1161,7 +1161,7 @@ func NSLookup(name string, hint uint32, server string) (uint32, []net.IP) {
 				NoseLock.Unlock()
 			}
 
-			if hint&HINT_IPV4 == hint&HINT_IPV6 {
+			if hint&HINT_IPV4 == 0 && hint&HINT_IPV6 == 0 || hint&HINT_IPV4 != 0 && hint&HINT_IPV6 != 0 {
 				address = append(GetIP(name, 1, hint, u, records), GetIP(name, 28, hint, u, records)...)
 			} else if hint&HINT_IPV4 != 0 {
 				address = GetIP(name, 1, hint, u, records)
