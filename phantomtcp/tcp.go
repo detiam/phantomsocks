@@ -220,7 +220,7 @@ func (pface *PhantomInterface) Dial(host string, port int, b []byte) (net.Conn, 
 			return err
 		}
 
-		if PassiveMode {
+		if PassiveMode || length == 0 {
 			raddr := raddrs[mathrand.Intn(len(raddrs))]
 
 			var laddr *net.TCPAddr = nil
