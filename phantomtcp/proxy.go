@@ -504,7 +504,7 @@ func QUICProxy(address string) {
 					continue
 				}
 				_, ips := pface.NSLookup(SNI)
-				if ips == nil {
+				if len(ips) == 0 {
 					continue
 				}
 
@@ -615,7 +615,7 @@ func SocksUDPProxy(address string) {
 					}
 				}
 				_, ips := pface.NSLookup(host)
-				if ips == nil {
+				if len(ips) == 0 {
 					continue
 				}
 
@@ -893,7 +893,7 @@ func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *Connecti
 
 			if pface.DNS != "" {
 				_, ips := pface.NSLookup(host)
-				if ips != nil {
+				if len(ips) != 0 {
 					ip := ips[rand.Intn(len(ips))]
 					ip4 := ip.To4()
 					if ip4 != nil {
