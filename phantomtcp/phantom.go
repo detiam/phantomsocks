@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -588,7 +589,16 @@ func LoadProfile(filename string) error {
 											records.IPv6Hint.Addresses = append(records.IPv6Hint.Addresses, result.IPv6Hint.Addresses...)
 										}
 									} else {
-										log.Println(keys[0], addrs[i], "bad address")
+										url, err := url.Parse(addrs[i])
+										if err != nil {
+											log.Println(keys[0], addrs[i], "bad address")
+										} else {
+											ipsource := url.Hostname()
+											if ipsource == "" {
+												ipsource = url.String()
+											}
+											records.IPSrcs = append(records.IPSrcs, ipsource)
+										}
 									}
 								} else {
 									ip4 := ip.To4()
