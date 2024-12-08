@@ -575,7 +575,7 @@ func LoadProfile(filename string) error {
 								if ip == nil {
 									result, hasCache := DNSCache[addrs[i]]
 									if hasCache {
-										if records.IPv4Hint != nil {
+										if result.IPv4Hint != nil {
 											if records.IPv4Hint == nil {
 												records.IPv4Hint = new(RecordAddresses)
 											}
