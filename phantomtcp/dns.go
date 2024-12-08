@@ -32,6 +32,7 @@ type DNSRecords struct {
 	IPv4Hint *RecordAddresses
 	IPv6Hint *RecordAddresses
 	CName    string
+	IPSrcs   []string
 	Ech      []byte
 }
 
@@ -1128,6 +1129,30 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 	}
 
 	var addresses []net.IP
+
+	if records.IPSrcs != nil {
+		var wg sync.WaitGroup
+		var domainNum = len(records.IPSrcs)
+		wg.Add(domainNum)
+		for i := 0; i < domainNum; i++ {
+			if records.IPSrcs[i] == name {
+				wg.Done()
+			} else {
+				go func(FakeCNAME string) {
+					defer wg.Done()
+					logPrintln(3, "FAKECNAME:", name, "->", FakeCNAME)
+					_, ips := pface.NSLookup(FakeCNAME)
+					if len(ips) == 0 {
+						logPrintln(1, errors.New("no such host: "+FakeCNAME))
+					} else {
+						addresses = append(addresses, ips...)
+					}
+				}(records.IPSrcs[i])
+			}
+		}
+		wg.Wait()
+	}
+
 	var readcache = func() {
 		for _, qtype := range qtypes {
 			switch qtype {
