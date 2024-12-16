@@ -18,7 +18,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type ServiceConfig struct {
@@ -774,7 +773,7 @@ func LoadHosts(ifacename string, hostsfiles []string) error {
 			br = bufio.NewReader(f)
 		} else if strings.HasPrefix(u.Scheme, "http") {
 			// WORKAROUND: wait something?
-			time.Sleep(time.Second)
+			//time.Sleep(time.Second)
 
 			// TODO: find out what caused such request to fail in the early stages of program startup.
 			resp, err := phttp.Get(u.String())
