@@ -188,18 +188,6 @@ func StartService() {
 		}
 	}
 
-	for _, interfaces := range ServiceConfig.Interfaces {
-		if interfaces.Hosts != nil {
-			err := ptcp.LoadHosts(interfaces.Name, interfaces.Hosts)
-			if err != nil {
-				if ptcp.LogLevel > 0 {
-					log.Println(err)
-				}
-				return
-			}
-		}
-	}
-
 	if len(ServiceConfig.Clients) > 0 {
 		allowlist = make(map[string]bool)
 		list := ServiceConfig.Clients
@@ -277,6 +265,18 @@ func StartService() {
 			fmt.Println("Reverse:", service.Address)
 			go ListenAndServe(service.Address, service.PrivateKey, ptcp.SNIProxy)
 			go ptcp.QUICProxy(service.Address)
+		}
+	}
+
+	for _, interfaces := range ServiceConfig.Interfaces {
+		if interfaces.Hosts != nil {
+			err := ptcp.LoadHosts(interfaces.Name, interfaces.Hosts)
+			if err != nil {
+				if ptcp.LogLevel > 0 {
+					log.Println(err)
+				}
+				return
+			}
 		}
 	}
 
