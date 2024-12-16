@@ -290,6 +290,7 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 	var err error
 	{
 		var pface *PhantomInterface = nil
+		// TODO: port remapping for domain
 		port := addr.Port
 
 		if domain == "" {
@@ -714,9 +715,15 @@ func Netcat(client net.Conn) {
 					if cmd[1] == "all" {
 						for _, records := range DNSCache {
 							if records.IPv4Hint.TTL != 0 {
+								for _, addr := range records.IPv4Hint.Addresses {
+									RTTMap.Delete(addr.String())
+								}
 								records.IPv4Hint = nil
 							}
 							if records.IPv6Hint.TTL != 0 {
+								for _, addr := range records.IPv6Hint.Addresses {
+									RTTMap.Delete(addr.String())
+								}
 								records.IPv6Hint = nil
 							}
 						}
@@ -724,9 +731,15 @@ func Netcat(client net.Conn) {
 						records, ok := DNSCache[cmd[1]]
 						if ok {
 							if records.IPv4Hint.TTL != 0 {
+								for _, addr := range records.IPv4Hint.Addresses {
+									RTTMap.Delete(addr.String())
+								}
 								records.IPv4Hint = nil
 							}
 							if records.IPv6Hint.TTL != 0 {
+								for _, addr := range records.IPv6Hint.Addresses {
+									RTTMap.Delete(addr.String())
+								}
 								records.IPv6Hint = nil
 							}
 						}

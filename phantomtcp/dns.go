@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,29 @@ import (
 
 var DNSCacheMutex sync.RWMutex
 var DNSRecordMutex sync.RWMutex
+
+type PortPair [2]int
+
+func (pp *PortPair) SrcPort(port int) int {
+	if port != 0 {
+		pp[0] = port
+	}
+	return pp[0]
+}
+
+func (pp *PortPair) DstPort(port int) int {
+	if port != 0 {
+		pp[1] = port
+	}
+	return pp[1]
+}
+
+var PortPairMap sync.Map
+
+type ipRTT struct {
+	ip  net.IP
+	rtt time.Duration
+}
 
 type RecordAddresses struct {
 	TTL       int64
@@ -31,6 +55,7 @@ type DNSRecords struct {
 	ALPN     uint32
 	IPv4Hint *RecordAddresses
 	IPv6Hint *RecordAddresses
+	RotateN  int
 	CName    string
 	IPSrcs   []string
 	Ech      []byte
@@ -46,6 +71,7 @@ var VirtualAddrPrefix byte = 255
 var DNSCache map[string]*DNSRecords = make(map[string]*DNSRecords)
 var Nose []DNSLie = []DNSLie{{"phantom.socks", nil}}
 var NoseLock sync.Mutex
+var RTTMap sync.Map
 
 type ParamLocker struct {
 	mu sync.Map
@@ -1122,9 +1148,101 @@ func GetDNSLie(index int) (string, *PhantomInterface) {
 	return lie.Name, lie.Interface
 }
 
+func (pface *PhantomInterface) GetSortedAddresses(addressesOne, addressesTwo []net.IP, rotate int) []net.IP {
+	var wg sync.WaitGroup
+	var sortedOne, sortedTwo, sorted []net.IP
+	var lenOne, lenTwo int
+	wg.Add(2)
+	for index, addresses := range [][]net.IP{addressesOne, addressesTwo} {
+		go func(index int, addresses []net.IP) {
+			defer wg.Done()
+			var result []net.IP
+			var withRTT []ipRTT
+			for _, ip := range addresses {
+				if rttValue, ok := RTTMap.Load(ip.String()); ok {
+					withRTT = append(withRTT, ipRTT{ip, rttValue.(time.Duration)})
+				} else {
+					result = append(result, ip)
+				}
+			}
+			sort.Slice(withRTT, func(i, j int) bool {
+				return withRTT[i].rtt < withRTT[j].rtt
+			})
+			for _, item := range withRTT {
+				result = append(result, item.ip)
+			}
+			if index == 0 {
+				sortedOne, lenOne = result, len(result)
+			} else {
+				sortedTwo, lenTwo = result, len(result)
+			}
+		}(index, addresses)
+	}
+	wg.Wait()
+	maxLen := lenOne
+	if lenTwo > lenOne {
+		maxLen = lenTwo
+	}
+	for i := 0; i < maxLen; i++ {
+		if i < lenOne && lenOne != 0 {
+			sorted = append(sorted, sortedOne[i])
+		}
+		if i < lenTwo && lenTwo != 0 {
+			sorted = append(sorted, sortedTwo[i])
+		}
+	}
+	if rotate > 0 && rotate < len(sorted) {
+		return append(sorted[len(sorted)-rotate:], sorted[:rotate]...)
+	} else {
+		return sorted
+	}
+}
+
+func (pface *PhantomInterface) GetSortedAddressesFormRecords(records *DNSRecords) []net.IP {
+	DNSRecordMutex.RLock()
+	defer DNSRecordMutex.RUnlock()
+	slice_addresses := [2][]net.IP{}
+	for _, qtype := range pface.GetQtypes() {
+		switch qtype {
+		case 1:
+			if records.IPv4Hint != nil {
+				slice_addresses[0] = records.IPv4Hint.Addresses
+			}
+		case 28:
+			if records.IPv6Hint != nil {
+				slice_addresses[1] = records.IPv6Hint.Addresses
+			}
+		}
+	}
+	if records.RotateN >= len(slice_addresses[0])+len(slice_addresses[1]) {
+		records.RotateN = 0
+	}
+	return pface.GetSortedAddresses(slice_addresses[1], slice_addresses[0], records.RotateN) // happy eyeball v6 at first
+}
+
+func (pface *PhantomInterface) GetQtypes() []uint16 {
+	var qtypes []uint16
+	if pface.Hint&HINT_IPV4 != 0 {
+		qtypes = append(qtypes, 1)
+	}
+	if pface.Hint&HINT_IPV6 != 0 {
+		qtypes = append(qtypes, 28)
+	}
+	if len(qtypes) == 0 {
+		qtypes = []uint16{1, 28}
+	}
+	return qtypes
+}
+
 func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
+	// if NSLookup() is triggered multiple times at the same time,
+	// we need lock it to avoid duplicate IP addresses in the return,
+	// this is very common in asynchronous web pages.
+	NSLookupLock.Lock(name)
+	defer NSLookupLock.Unlock(name)
+
 	hint := pface.Hint
-	records := LoadDNSCache(name)
+	records, hasCache := LoadDNSCache(name), true
 	if records == nil {
 		records = new(DNSRecords)
 		StoreDNSCache(name, records)
@@ -1133,6 +1251,7 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 		for i := 0; i < SubdomainDepth; i++ {
 			off := strings.Index(name[offset:], ".")
 			if off == -1 {
+				hasCache = false
 				break
 			}
 			offset += off
@@ -1146,73 +1265,42 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 		}
 	}
 
-	var qtypes []uint16
-	if hint&HINT_IPV4 != 0 {
-		qtypes = append(qtypes, 1)
-	}
-	if hint&HINT_IPV6 != 0 {
-		qtypes = append(qtypes, 28)
-	}
-	if len(qtypes) == 0 {
-		qtypes = []uint16{1, 28}
-	}
-
 	var addresses []net.IP
-
 	if records.IPSrcs != nil {
 		var wg sync.WaitGroup
 		var domainNum = len(records.IPSrcs)
 		wg.Add(domainNum)
+		var locker sync.Mutex
 		for i := 0; i < domainNum; i++ {
 			if records.IPSrcs[i] == name {
 				wg.Done()
 			} else {
 				go func(FakeCNAME string) {
 					defer wg.Done()
-					logPrintln(3, "FAKECNAME:", name, "->", FakeCNAME)
+					logPrintln(3, "fakecname", name, "->", FakeCNAME)
 					_, ips := pface.NSLookup(FakeCNAME)
 					if len(ips) == 0 {
 						logPrintln(1, errors.New("no such host: "+FakeCNAME))
 					} else {
+						locker.Lock()
 						addresses = append(addresses, ips...)
+						locker.Unlock()
 					}
 				}(records.IPSrcs[i])
 			}
 		}
 		wg.Wait()
-	}
-
-	var readcache = func() {
-		for _, qtype := range qtypes {
-			switch qtype {
-			case 1:
-				if records.IPv4Hint != nil {
-					addresses = append(addresses, records.IPv4Hint.Addresses...)
-				}
-			case 28:
-				if records.IPv6Hint != nil {
-					addresses = append(addresses, records.IPv6Hint.Addresses...)
-				}
-			}
+		if hasCache {
+			addresses = append(pface.GetSortedAddressesFormRecords(records), addresses...)
+		}
+	} else {
+		if hasCache {
+			addresses = pface.GetSortedAddressesFormRecords(records)
 		}
 	}
 
-	// read cache first
-	readcache()
-	if len(addresses) != 0 {
+	if len(addresses) > 0 {
 		logPrintln(3, "cache", name, addresses)
-		return records.Index, addresses
-	}
-
-	// if NSLookup() is triggered multiple times at the same time,
-	// we need lock it to avoid duplicate IP addresses in the return,
-	// this is very common in asynchronous web pages.
-	NSLookupLock.Lock(name)
-	defer NSLookupLock.Unlock(name)
-
-	// recheck cache after lock
-	readcache()
-	if len(addresses) != 0 {
 		return records.Index, addresses
 	}
 
@@ -1227,7 +1315,7 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 	}
 
 	var lookupwg sync.WaitGroup
-	for _, qtype := range qtypes {
+	for _, qtype := range pface.GetQtypes() {
 		lookupwg.Add(1)
 		go func(qtype uint16) {
 			defer lookupwg.Done()
@@ -1284,7 +1372,6 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 				if records.IPv4Hint == nil {
 					records.IPv4Hint = &RecordAddresses{0, []net.IP{}}
 				}
-				addresses = append(addresses, records.IPv4Hint.Addresses...)
 			case 28:
 				if records.IPv6Hint == nil && options.Fallback != nil {
 					if options.Fallback.To4() == nil {
@@ -1294,7 +1381,6 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 				if records.IPv6Hint == nil {
 					records.IPv6Hint = &RecordAddresses{0, []net.IP{}}
 				}
-				addresses = append(addresses, records.IPv6Hint.Addresses...)
 			}
 
 			DNSRecordMutex.Unlock()
@@ -1302,6 +1388,8 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 	}
 
 	lookupwg.Wait()
+
+	addresses = pface.GetSortedAddressesFormRecords(records)
 	if len(addresses) == 0 && records.CName != "" {
 		logPrintln(3, "cname", name, "->", records.CName, addresses)
 		return pface.NSLookup(records.CName)
@@ -1348,6 +1436,9 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 			if records.IPv4Hint.TTL == 0 || records.IPv4Hint.TTL > CurrentTime {
 				return records.Index, records.BuildResponse(request, qtype, 60)
 			}
+			for _, addr := range records.IPv4Hint.Addresses {
+				RTTMap.Delete(addr.String())
+			}
 			records.IPv4Hint = nil
 		} else if records.Index > 0 {
 			return records.Index, records.BuildResponse(request, qtype, 60)
@@ -1356,6 +1447,9 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		if records.IPv6Hint != nil {
 			if records.IPv6Hint.TTL == 0 || records.IPv6Hint.TTL > CurrentTime {
 				return records.Index, records.BuildResponse(request, qtype, 60)
+			}
+			for _, addr := range records.IPv6Hint.Addresses {
+				RTTMap.Delete(addr.String())
 			}
 			records.IPv6Hint = nil
 		} else if records.Index > 0 {
@@ -1521,26 +1615,54 @@ func (pface *PhantomInterface) ResolveTCPAddr(host string, port int) (*net.TCPAd
 		return nil, errors.New("no such host")
 	}
 
-	return &net.TCPAddr{IP: addrs[rand.Intn(len(addrs))], Port: port}, nil
+	addr := addrs[rand.Intn(len(addrs))]
+	val, ok := PortPairMap.Load(addr.String())
+	if ok {
+		pp := val.(PortPair)
+		if port == pp.SrcPort(0) {
+			port = pp.DstPort(0)
+		}
+	}
+
+	return &net.TCPAddr{IP: addr, Port: port}, nil
 }
 
 func (pface *PhantomInterface) ResolveTCPAddrs(host string, port int) ([]*net.TCPAddr, error) {
+	var addrs []net.IP
+
 	ip := net.ParseIP(host)
 	if ip != nil {
-		tcpAddrs := make([]*net.TCPAddr, 1)
-		tcpAddrs[0] = &net.TCPAddr{IP: ip, Port: port}
-		return tcpAddrs, nil
+		records := LoadDNSCache(ip.String())
+		if records != nil {
+			addrs = pface.GetSortedAddressesFormRecords(records)
+		} else {
+			addrs = make([]net.IP, 1)
+			addrs[0] = ip
+		}
+	} else {
+		_, addrs = pface.NSLookup(host)
+		if len(addrs) == 0 {
+			return nil, errors.New("no such host")
+		}
 	}
 
-	_, addrs := pface.NSLookup(host)
-	if len(addrs) == 0 {
-		return nil, errors.New("no such host")
-	}
-	tcpAddrs := make([]*net.TCPAddr, len(addrs))
+	tcpAddrs, wg := make([]*net.TCPAddr, len(addrs)), sync.WaitGroup{}
 	for i, addr := range addrs {
-		tcpAddrs[i] = &net.TCPAddr{IP: addr, Port: port}
+		wg.Add(1)
+		go func(i int, addr net.IP) {
+			defer wg.Done()
+			val, ok := PortPairMap.Load(addr.String())
+			if ok {
+				pp := val.(PortPair)
+				if port == pp.SrcPort(0) {
+					port = pp.DstPort(0)
+				}
+			}
+			tcpAddrs[i] = &net.TCPAddr{IP: addr, Port: port}
+		}(i, addr)
 	}
 
+	wg.Wait()
 	return tcpAddrs, nil
 }
 

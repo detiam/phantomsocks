@@ -158,7 +158,6 @@ func StartService() {
 	var ServiceConfig struct {
 		VirtualAddrPrefix int    `json:"vaddrprefix,omitempty"`
 		SystemProxy       string `json:"proxy,omitempty"`
-		HostsFile         string `json:"hosts,omitempty"`
 
 		Clients    []string               `json:"clients,omitempty"`
 		Profiles   []string               `json:"profiles,omitempty"`
@@ -189,13 +188,15 @@ func StartService() {
 		}
 	}
 
-	if ServiceConfig.HostsFile != "" {
-		err := ptcp.LoadHosts(ServiceConfig.HostsFile)
-		if err != nil {
-			if ptcp.LogLevel > 0 {
-				log.Println(err)
+	for _, interfaces := range ServiceConfig.Interfaces {
+		if interfaces.Hosts != nil {
+			err := ptcp.LoadHosts(interfaces.Name, interfaces.Hosts)
+			if err != nil {
+				if ptcp.LogLevel > 0 {
+					log.Println(err)
+				}
+				return
 			}
-			return
 		}
 	}
 

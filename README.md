@@ -79,6 +79,15 @@ Usage of ./phantomsocks:
             "dns": "udp://8.8.8.8:53",
             "protocol": "socks4",
             "address": "127.0.0.1:1080"
+        },
+        {
+            "name": "hosts",
+            "dns": "udp://8.8.8.8:53",
+            "hosts": [
+                "https://sbc.io/hosts/hosts",
+                "file:///etc/hosts",
+                "hosts.txt"
+            ]
         }
     ]
 }
@@ -151,6 +160,8 @@ config.json:
   domain            #this domain will be resolved by DNS
   domain=[domain]   #this domain will use the config of this domain
   domain=domain     #this domain will use the addresses of this domain
+  
+  ip=port->port,... #the left port will be redirect to the right port 
   
   [dot]             #domains below will use the config of dot
   domain
