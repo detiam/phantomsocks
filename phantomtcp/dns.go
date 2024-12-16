@@ -416,29 +416,54 @@ func GetQName(buf []byte) (string, int, int) {
 	return qname, qtype, end
 }
 
+// chatgpt fixed error-analytics-sessions-production.shopifysvc.com xD
+// https://www.atk.store/products/atk-fierce-x-lightweight-wireless-gaming-mouse
 func GetName(buf []byte, offset int) (string, int) {
 	name := ""
+	visitedOffsets := make(map[int]bool)
+
 	for {
+		if offset >= len(buf) {
+			return "", -1
+		}
+
+		if visitedOffsets[offset] {
+			return "", -1
+		}
+		visitedOffsets[offset] = true
+
 		length := int(buf[offset])
 		offset++
+
 		if length == 0 {
 			break
 		}
+
+		if (length & 0xC0) == 0xC0 {
+			if offset >= len(buf) {
+				return "", -1
+			}
+			ptrOffset := ((length & 0x3F) << 8) | int(buf[offset])
+			offset++
+
+			if ptrOffset >= len(buf) {
+				return "", -1
+			}
+
+			ptrName, _ := GetName(buf, ptrOffset)
+			name += ptrName
+			return name, offset
+		}
+
+		if offset+length > len(buf) {
+			return "", -1
+		}
+		label := string(buf[offset : offset+length])
 		if name != "" {
 			name += "."
 		}
-		if length < 63 {
-			name += string(buf[offset : offset+length])
-			offset += int(length)
-			if offset+2 > len(buf) {
-				return "", offset
-			}
-		} else {
-			_offset := int(buf[offset])
-			_name, _ := GetName(buf, _offset)
-			name += _name
-			return name, offset + 1
-		}
+		name += label
+		offset += length
 	}
 	return name, offset
 }
@@ -510,7 +535,6 @@ func (records *DNSRecords) GetAnswers(response []byte, options ServerOptions) {
 		offset = _offset + 4
 	}
 
-	cname := ""
 	for i := 0; i < ANCount; i++ {
 		_offset := GetNameOffset(response, offset)
 		if _offset == 0 {
@@ -623,8 +647,13 @@ func (records *DNSRecords) GetAnswers(response []byte, options ServerOptions) {
 				offset = SvcParamEnd
 			}
 		case 5:
-			cname, _ = GetName(response, offset)
-			logPrintln(4, "CNAME:", cname)
+			cname, cnameOffset := GetName(response, offset)
+			logPrintln(4, "cname", cname)
+			if cnameOffset == -1 {
+				log.Println("Invalid CNAME record")
+				return
+			}
+			records.CName = cname
 		}
 
 		offset += int(DataLength)
@@ -1247,8 +1276,13 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 	}
 
 	lookupwg.Wait()
-	logPrintln(3, "nslookup", name, addresses)
-	return records.Index, addresses
+	if len(addresses) == 0 && records.CName != "" {
+		logPrintln(3, "cname", name, "->", records.CName, addresses)
+		return pface.NSLookup(records.CName)
+	} else {
+		logPrintln(3, "nslookup", name, addresses)
+		return records.Index, addresses
+	}
 }
 
 func NSRequest(request []byte, cache bool) (uint32, []byte) {
