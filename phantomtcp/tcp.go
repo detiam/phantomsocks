@@ -142,9 +142,20 @@ func GetLocalAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 	return nil, nil
 }
 
-func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []byte) (net.Conn, *ConnectionInfo, error) {
+func (pface *PhantomInterface) Dial(conn net.Conn, host string, origport int, b []byte) (net.Conn, *ConnectionInfo, error) {
+	errHandle := func(err error, conn net.Conn) (net.Conn, *ConnectionInfo, error) {
+		if conn != nil {
+			conn.Close()
+		}
+		records := LoadDNSCache(host)
+		if records != nil {
+			records.RotateN++
+		}
+		return nil, nil, err
+	}
+
 	connect_err := errors.New("connection does not exist")
-	raddrs, err := pface.GetRemoteAddresses(host, port)
+	raddrs, err := pface.GetRemoteAddresses(host, origport)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -153,8 +164,8 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 	hint := pface.Hint
 
 	if hint&HINT_FAKE == 0 {
+		raddr := raddrs[mathrand.Intn(len(raddrs))]
 		if conn == nil {
-			raddr := raddrs[mathrand.Intn(len(raddrs))]
 			var laddr *net.TCPAddr = nil
 			if device != "" {
 				laddr, err = GetLocalAddr(device, raddr.IP.To4() == nil)
@@ -167,7 +178,7 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 		}
 
 		if err == nil {
-			proxyConn, err := pface.ProxyHandshake(conn, nil, host, port, b)
+			proxyConn, err := pface.ProxyHandshake(conn, nil, host, raddr.Port, b)
 			if err != nil {
 				conn.Close()
 				return nil, nil, err
@@ -223,9 +234,9 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 				}
 			}
 
-			conn, err = net.DialTCP("tcp", laddr, raddr)
+			netconn, err := net.DialTCP("tcp", laddr, raddr)
 			if err == nil {
-				conn, err = pface.ProxyHandshake(conn, nil, host, port, nil)
+				conn, err = pface.ProxyHandshake(netconn, nil, host, raddr.Port, nil)
 			}
 
 			if err == nil && b != nil {
@@ -244,7 +255,9 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 			}
 
 			if err != nil {
-				conn.Close()
+				if conn != nil {
+					conn.Close()
+				}
 				return nil, nil, err
 			}
 
@@ -296,91 +309,100 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 				cut = (min_dot + max_dot) / 2
 			}
 
-			var synpacket *ConnectionInfo
-			var preferaddrs, fallbackaddrs []*net.TCPAddr
-			for _, addr := range raddrs {
-				switch {
-				case hint&HINT_IPV4 == 0 && hint&HINT_IPV6 == 0: // prefer IPv4
-					if addr.IP.To4() != nil {
-						preferaddrs = append(preferaddrs, addr)
-					} else {
-						fallbackaddrs = append(fallbackaddrs, addr)
-					}
-				case hint&HINT_IPV4 != 0 && hint&HINT_IPV6 != 0: // prefer IPv6
-					if addr.IP.To4() == nil {
-						preferaddrs = append(preferaddrs, addr)
-					} else {
-						fallbackaddrs = append(fallbackaddrs, addr)
-					}
-				default:
-					preferaddrs = append(preferaddrs, addr)
-				}
-			}
-
 			type DailResult struct {
 				conn      net.Conn
 				synpacket *ConnectionInfo
 				err       error
 			}
 
-			synpacket2chan := func(addrs []*net.TCPAddr, channel chan DailResult) {
-				if addrs == nil {
-					channel <- DailResult{err: errors.New("no addrs?")}
-					return
-				}
-				for _, addr := range addrs {
-					laddr, err := GetLocalAddr(device, addr.IP.To4() == nil)
-					if err != nil {
-						channel <- DailResult{err: errors.New("invalid device")}
-						return
-					}
-
-					conn, synpacket, err := DialConnInfo(laddr, addr, pface, tfo_payload)
-					if err != nil {
-						if IsNormalError(err) {
-							continue
+			dial_done, dial_group, rtt_tolerant := false, sync.WaitGroup{}, 5*time.Millisecond
+			synpchan, nil_synpacket := make(chan DailResult, len(raddrs)), errors.New("nil synpacket")
+			go func() {
+				for index, raddr := range raddrs {
+					old_rtt := func() time.Duration {
+						if val, ok := RTTMap.Load(raddr.IP.String()); ok {
+							return val.(time.Duration)
+						} else {
+							return time.Duration(245 * time.Millisecond)
 						}
-						channel <- DailResult{err: err}
+					}()
+
+					laddr, err := GetLocalAddr(device, raddr.IP.To4() == nil)
+					if err != nil {
+						synpchan <- DailResult{err: err}
 						return
 					}
 
-					channel <- DailResult{conn: conn, synpacket: synpacket, err: err}
-					return
+					if index > 0 {
+						rtt_now := old_rtt + rtt_tolerant
+						// Happy Eyeball begin wating
+						<-time.After(rtt_now)
+						if dial_done {
+							break
+						}
+						logPrintln(4, host, raddr, "Happy Eyeball", index, rtt_now, time.Since(start_time))
+					}
+
+					dial_group.Add(1)
+					go func(raddr *net.TCPAddr) {
+						defer dial_group.Done()
+						rtt_start_time := time.Now()
+						conn, synpacket, err := DialConnInfo(laddr, raddr, pface, tfo_payload)
+						rtt := time.Since(rtt_start_time)
+
+						if rtt <= old_rtt-(rtt_tolerant-1) || rtt >= old_rtt+(rtt_tolerant-1) {
+							// RTT changes over 4ms, update
+							RTTMap.Store(raddr.IP.String(), rtt)
+						}
+
+						if err != nil {
+							synpchan <- DailResult{conn, synpacket, err}
+							return
+						}
+
+						if synpacket == nil {
+							logPrintln(3, host, raddr, connect_err, time.Since(start_time))
+							synpchan <- DailResult{conn, synpacket, nil_synpacket}
+							return
+						}
+
+						synpchan <- DailResult{conn, synpacket, nil}
+					}(raddr)
 				}
-				channel <- DailResult{err: connect_err}
+				dial_done = true
+				//logPrintln(4, host, "all addresses dialed", time.Since(start_time))
+			}()
+
+			var result DailResult
+		waitdials:
+			result = <-synpchan
+			if result.err != nil {
+				if !dial_done {
+					if IsNormalError(err) {
+						goto waitdials
+					}
+					if result.err == nil_synpacket {
+						// will try other ip
+						goto waitdials
+					}
+				}
+				return errHandle(result.err, result.conn)
 			}
 
-			synpchan := make(chan DailResult, 2)
-			if len(preferaddrs) > 0 {
-				go synpacket2chan(preferaddrs, synpchan)
-			} else {
-				go synpacket2chan(fallbackaddrs, synpchan)
-			}
-			select {
-			case result := <-synpchan:
-				if result.err != nil {
-					return nil, nil, result.err
-				}
-				conn = result.conn
-				synpacket = result.synpacket
-			case <-time.After(300 * time.Millisecond):
-				if len(fallbackaddrs) > 0 && len(preferaddrs) > 0 {
-					go synpacket2chan(fallbackaddrs, synpchan)
-				}
-				result := <-synpchan
-				if result.err != nil {
-					return nil, nil, result.err
-				}
-				conn = result.conn
-				synpacket = result.synpacket
-			}
+			dial_done = true
+			conn = result.conn
+			synpacket := result.synpacket
 
-			if synpacket == nil {
-				if conn != nil {
-					conn.Close()
+			go func() {
+				dial_group.Wait()
+				if len(synpchan) > 0 {
+					for result := range synpchan {
+						if result.conn != nil {
+							result.conn.Close()
+						}
+					}
 				}
-				return nil, nil, connect_err
-			}
+			}()
 
 			logPrintln(3, host, conn.RemoteAddr(), "connected", time.Since(start_time))
 
@@ -391,10 +413,10 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 			synpacket.TCP.Seq++
 
 			if pface.Protocol != 0 {
+				_, port := splitHostPort(conn.RemoteAddr().String())
 				conn, err = pface.ProxyHandshake(conn, synpacket, host, port, nil)
 				if err != nil {
-					conn.Close()
-					return nil, nil, err
+					return errHandle(err, conn)
 				}
 				if pface.Protocol == HTTPS {
 					conn.Write(b)
@@ -407,8 +429,7 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 				if (hint & HINT_HTFO) != 0 {
 					_, err = conn.Write(b[cut:])
 					if err != nil {
-						conn.Close()
-						return nil, nil, err
+						return errHandle(err, conn)
 					}
 				}
 				synpacket.TCP.Seq += uint32(len(b))
@@ -420,8 +441,7 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 				} else {
 					err = send_magic_packet(synpacket, fakepayload, hint, pface.TTL, count)
 					if err != nil {
-						conn.Close()
-						return nil, nil, err
+						return errHandle(err, conn)
 					}
 				}
 
@@ -434,35 +454,30 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 					}
 					_, err = conn.Write(b[:SegOffset])
 					if err != nil {
-						conn.Close()
-						return nil, nil, err
+						return errHandle(err, conn)
 					}
 				}
 
 				_, err = conn.Write(b[SegOffset:cut])
 				if err != nil {
-					conn.Close()
-					return nil, nil, err
+					return errHandle(err, conn)
 				}
 
 				err = send_magic_packet(synpacket, fakepayload, hint, pface.TTL, count)
 				if err != nil {
-					conn.Close()
-					return nil, nil, err
+					return errHandle(err, conn)
 				}
 
 				_, err = conn.Write(b[cut:])
 				if err != nil {
-					conn.Close()
-					return nil, nil, err
+					return errHandle(err, conn)
 				}
 
 				synpacket.TCP.Seq += uint32(len(b))
 				if hint&HINT_SAT != 0 {
 					_, err = rand.Read(fakepayload)
 					if err != nil {
-						conn.Close()
-						return nil, nil, err
+						return errHandle(err, conn)
 					}
 					err = send_magic_packet(synpacket, fakepayload, hint, pface.TTL, 2)
 				}

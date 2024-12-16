@@ -6,16 +6,19 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type ServiceConfig struct {
@@ -45,7 +48,8 @@ type InterfaceConfig struct {
 	PublicKey  string `json:"publickey,omitempty"`
 	PrivateKey string `json:"privatekey,omitempty"`
 
-	Peers []Peer `json:"peers,omitempty"`
+	Peers []Peer   `json:"peers,omitempty"`
+	Hosts []string `json:"hosts,omitempty"`
 
 	Timeout  int    `json:"timeout,omitempty"`
 	Fallback string `json:"fallback,omitempty"`
@@ -564,6 +568,25 @@ func LoadProfile(filename string) error {
 							continue
 						} else {
 							ip := net.ParseIP(keys[0])
+							if ip != nil {
+								var pp PortPair
+								for _, str_portremapping := range strings.Split(keys[1], ",") {
+									for i, str_port := range strings.SplitN(str_portremapping, "->", 2) {
+										port, err := strconv.Atoi(str_port)
+										if err != nil {
+											log.Println(keys[0], port, "bad port")
+										}
+										if i == 0 {
+											pp.SrcPort(port)
+										} else {
+											pp.DstPort(port)
+										}
+									}
+
+									PortPairMap.Store(ip.String(), pp)
+								}
+							}
+
 							records := new(DNSRecords)
 							if CurrentInterface.Hint&HINT_MODIFY != 0 || CurrentInterface.Protocol != 0 {
 								records.Index = AddDNSLie(keys[0], CurrentInterface)
@@ -691,62 +714,128 @@ func LoadProfile(filename string) error {
 	return nil
 }
 
-func LoadHosts(filename string) error {
-	hosts, err := os.Open(filename)
-	if err != nil {
-		return err
+func LoadHosts(ifacename string, hostsfiles []string) error {
+	pface, ok := InterfaceMap[ifacename]
+	if !ok {
+		return errors.New("phantomsocks interface '" + ifacename + "' not found")
 	}
-	defer hosts.Close()
 
-	br := bufio.NewReader(hosts)
+	phttp := &http.Client{
+		Transport: &http.Transport{
+			Dial: func(network, addr string) (net.Conn, error) {
+				if strings.HasPrefix(network, "tcp") {
+					clientConn, serverConn := net.Pipe()
+					host, port := splitHostPort(addr)
+					if port == 0 {
+						if strings.HasSuffix(addr, "https") {
+							port = 443
+						} else {
+							port = 80
+						}
+					}
+					ip := net.ParseIP(host)
+					if ip != nil {
+						go tcp_redirect(clientConn, &net.TCPAddr{IP: ip, Port: port}, "", nil)
+					} else {
+						go tcp_redirect(clientConn, &net.TCPAddr{Port: port}, host, nil)
+					}
+					return serverConn, nil
+				} else {
+					return net.Dial(network, addr)
+				}
+			},
+		},
+	}
 
-	for {
-		line, _, err := br.ReadLine()
-		if err == io.EOF {
-			break
-		}
+	for _, hostsfile := range hostsfiles {
+		var br *bufio.Reader
+
+		u, err := url.Parse(hostsfile)
 		if err != nil {
-			logPrintln(1, err)
+			return err
 		}
 
-		if len(line) == 0 || line[0] == '#' {
-			continue
+		if u.Scheme == "" || u.Scheme == "file" {
+			finfo, err := os.Stat(u.Path)
+			if err != nil {
+				return err
+			}
+
+			if finfo.IsDir() {
+				return errors.New("needs file, not folder '" + hostsfile + "'")
+			}
+
+			f, err := os.Open(u.Path)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+
+			br = bufio.NewReader(f)
+		} else if strings.HasPrefix(u.Scheme, "http") {
+			// WORKAROUND: wait something?
+			time.Sleep(time.Second)
+
+			// TODO: find out what caused such request to fail in the early stages of program startup.
+			resp, err := phttp.Get(u.String())
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("remote hosts request failed, code: %d", resp.StatusCode)
+			}
+
+			br = bufio.NewReader(resp.Body)
 		}
 
-		k := strings.SplitN(string(line), "\t", 2)
-		if len(k) == 2 {
-			var records *DNSRecords
-
-			name := k[1]
-			_, ok := DNSCache[name]
-			if ok {
+		for {
+			line, _, err := br.ReadLine()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				logPrintln(1, err)
+			}
+			if len(line) == 0 || line[0] == '#' {
 				continue
 			}
-			offset := 0
-			for i := 0; i < SubdomainDepth; i++ {
-				off := strings.Index(name[offset:], ".")
-				if off == -1 {
-					break
-				}
-				offset += off
-				result, ok := DNSCache[name[offset:]]
-				if ok {
-					records = new(DNSRecords)
-					*records = *result
-					DNSCache[name] = records
-					continue
-				}
-				offset++
+
+			k := strings.Fields(string(line))
+			name, ipstr := k[1], k[0]
+			if len(k) != 2 {
+				logPrintln(1, "bad hosts line", k)
+				continue
 			}
 
-			pface, _ := DefaultProfile.GetInterface(name)
-			if ok && pface.Hint != 0 {
+			if func() bool {
+				offset := 0
+				for i := 0; i < SubdomainDepth; i++ {
+					off := strings.Index(name[offset:], ".")
+					if off == -1 {
+						break
+					}
+					top := LoadDNSCache(name[offset:])
+					if top != nil {
+						return true
+					}
+					offset += off + 1
+				}
+				return false
+			}() {
+				continue
+			}
+
+			records := new(DNSRecords)
+			StoreDNSCache(name, records)
+			if pface.Hint != 0 {
 				records.Index = AddDNSLie(name, pface)
 				records.ALPN = pface.Hint & HINT_DNS
 			}
-			ip := net.ParseIP(k[0])
+			ip := net.ParseIP(ipstr)
 			if ip == nil {
-				fmt.Println(ip, "bad ip address")
+				logPrintln(1, "bad ip address", ip)
 				continue
 			}
 			ip4 := ip.To4()
@@ -755,9 +844,11 @@ func LoadHosts(filename string) error {
 			} else {
 				records.IPv6Hint = &RecordAddresses{0x7FFFFFFFFFFFFFFF, []net.IP{ip}}
 			}
+			logPrintln(3, "store", name, ifacename, ipstr)
 		}
 	}
 
+	logPrintln(0, "Hosts:", ifacename, hostsfiles)
 	return nil
 }
 
